@@ -51,15 +51,20 @@ public sealed partial class SwitchService : ISwitchService, IDisposable {
 
     private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(2);
 
-    /// <summary>Unreadable-ports observations a freshly-connected switch gets for free before
-    /// they start counting against it (§42.3). Covers USB re-enumeration and drivers that
-    /// answer Connected before their first status frame has landed.</summary>
+    /// <summary>Unreadable-ports observations a switch gets for free, once per connection,
+    /// before they start counting against it (§42.3). Covers USB re-enumeration and drivers
+    /// that answer Connected before their first status frame has landed. Spent by the first
+    /// such observations of the connection's LIFETIME rather than by a post-connect clock, so
+    /// a switch that runs cleanly for hours still has its two in hand when it first stumbles —
+    /// deliberate (an isolated bad read is exactly what shouldn't count), at the cost of
+    /// adding these ticks to the worst-case detection time.</summary>
     private const int PortReadGraceTicks = 2;
 
     /// <summary>Consecutive unreadable-ports ticks before a device that still answers
     /// <c>Connected</c> is declared lost (§42.3). Deliberately longer than the hard probe's
     /// three: this signal fires on ordinary read failures, which recover on their own far
-    /// more often than a dead transport does. ≈20 s at the 2 s refresh interval.</summary>
+    /// more often than a dead transport does. ≈20 s at the 2 s refresh interval, or ≈24 s
+    /// including the <see cref="PortReadGraceTicks"/> a connection has not yet spent.</summary>
     private const int PortsLostThreshold = 10;
 
     private readonly ILogger<SwitchService> _logger;
@@ -300,7 +305,8 @@ public sealed partial class SwitchService : ISwitchService, IDisposable {
                 // (not one blip) trips the device to Error + publishes the §42.2 fault.
                 if (!ProbeConnected(client)) {
                     if (ObserveProbeIfLive(conn, client, probeSucceeded: false) == ProbeVerdict.Lost) {
-                        TripConnectionLost(conn);
+                        TripConnectionLost(conn,
+                            $"stopped answering {DeviceConnectionProbe.DefaultLostThreshold} consecutive connection probes");
                     }
                     continue; // this device didn't answer — skip its reads, not the whole tick
                 }
@@ -333,7 +339,8 @@ public sealed partial class SwitchService : ISwitchService, IDisposable {
                         var verdict = ObservePortsProbeIfLive(conn, client);
                         if (verdict == ProbeVerdict.Lost) {
                             LogPortsUnreadable(conn.Device.Name, advertised ?? -1);
-                            TripConnectionLost(conn);
+                            TripConnectionLost(conn,
+                                $"answered as connected but delivered no readable ports on {PortsLostThreshold} consecutive reads");
                         }
                         continue; // no ports to cache either way
                     }
@@ -694,7 +701,11 @@ public sealed partial class SwitchService : ISwitchService, IDisposable {
         }
     }
 
-    private void TripConnectionLost(SwitchConnection conn) {
+    /// <param name="reason">What actually stopped answering, in the user-facing §42.2 fault.
+    /// Two detectors call this and they have different thresholds, so a single hardcoded
+    /// message would tell the user "3 consecutive connection probes" for a trip that in fact
+    /// took ten unreadable reads.</param>
+    private void TripConnectionLost(SwitchConnection conn, string reason) {
         lock (_gate) {
             // Only trip the connection we probed if it is still the live entry for its device
             // number and still Connected (a concurrent disconnect/replace supersedes the probe).
@@ -712,7 +723,7 @@ public sealed partial class SwitchService : ISwitchService, IDisposable {
         LogConnectionLost(conn.Device.Name);
         _faults?.Publish(new EquipmentFaultEvent(DeviceType.Switch, conn.Device.UniqueId, conn.Device.Name,
             EquipmentFaultKind.Disconnected,
-            $"stopped answering {DeviceConnectionProbe.DefaultLostThreshold} consecutive connection probes",
+            reason,
             DateTimeOffset.UtcNow));
     }
 
