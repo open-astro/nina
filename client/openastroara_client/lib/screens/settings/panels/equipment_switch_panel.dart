@@ -15,6 +15,7 @@ import '../../../state/ws/ws_providers.dart';
 import '../../../theme/ara_colors.dart';
 import '../../../util/friendly_error.dart';
 import '../../../widgets/equipment/alpaca_chooser_dialog.dart';
+import '../../../widgets/equipment/switch_device_body.dart';
 import '../../../widgets/settings/editable_field.dart';
 import '../../../widgets/settings/settings_row.dart';
 
@@ -39,17 +40,51 @@ class _EquipmentSwitchPanelState extends ConsumerState<EquipmentSwitchPanel> {
   // connecting, and stops when the panel is disposed.
   Timer? _settlePoll;
 
+  /// Ticks spent waiting for a connected switch to report its ports. Bounded so
+  /// a device that genuinely exposes none doesn't poll for the panel's lifetime.
+  int _portWaitTicks = 0;
+  static const _maxPortWaitTicks = 8; // ~12 s at the 1.5 s tick
+
+  /// Free-running tick count, used to pace the telemetry re-read.
+  int _tick = 0;
+
+  /// Re-read every other tick (~3 s) while a connected switch exposes read-only
+  /// telemetry. A power box's voltage/current/temperature/humidity are live
+  /// values the user watches change; the list is otherwise pull-on-demand and
+  /// the daemon's `equipment.state_changed` events are not a dependable clock
+  /// for them (they stop while the device sits idle), so the strip would freeze
+  /// on whatever it read when the panel opened.
+  static const _telemetryEveryNTicks = 2;
+
   @override
   void initState() {
     super.initState();
     _settlePoll = Timer.periodic(const Duration(milliseconds: 1500), (_) {
       final list = ref.read(switchListProvider).value;
-      final anyConnecting =
-          list != null &&
-          list.any(
-            (d) => d.connectionState == SwitchConnectionState.connecting,
-          );
-      if (anyConnecting) {
+      if (list == null) return;
+      final anyConnecting = list.any(
+        (d) => d.connectionState == SwitchConnectionState.connecting,
+      );
+      // The daemon reports `connected` as soon as the Alpaca link opens, which
+      // is BEFORE it has enumerated the device's ports — so a card can settle
+      // to connected-with-zero-ports. The list is pull-on-demand (no periodic
+      // refresh), so without this it would sit on "No ports reported by this
+      // switch" until the user left the panel and came back.
+      final awaitingPorts = list.any((d) => d.isConnected && d.ports.isEmpty);
+      // Reset the budget whenever nothing is waiting, so a LATER gap (a
+      // transient empty read on an already-settled device) gets its own full
+      // budget instead of inheriting a spent one.
+      if (anyConnecting || !awaitingPorts) _portWaitTicks = 0;
+      final keepWaiting = awaitingPorts && _portWaitTicks < _maxPortWaitTicks;
+      if (!anyConnecting && keepWaiting) _portWaitTicks++;
+      // Keep the Readings strip live for as long as the panel is on screen.
+      final hasTelemetry = list.any(
+        (d) => d.isConnected && d.ports.any((p) => !p.canWrite),
+      );
+      _tick++;
+      final telemetryDue =
+          hasTelemetry && _tick % _telemetryEveryNTicks == 0;
+      if (anyConnecting || keepWaiting || telemetryDue) {
         ref.read(switchListProvider.notifier).refresh();
       }
     });
@@ -132,10 +167,25 @@ class _EquipmentSwitchPanelState extends ConsumerState<EquipmentSwitchPanel> {
           )
         else
           ...switch (switches) {
-            AsyncData(:final value) =>
-              value.isEmpty
-                  ? const [_EmptyState()]
-                  : [for (final d in value) _SwitchCard(device: d)],
+            // Match on "has a value" BEFORE the error arm: the panel re-reads
+            // every ~3 s to keep telemetry live, and a failed poll leaves an
+            // AsyncError that still carries the last good list. Matching the
+            // error first would blank every card on a single hiccup — mid
+            // interaction — and restore them a tick later. Keep the cards and
+            // say so inline instead.
+            AsyncValue(:final value?, hasValue: true) => [
+              if (switches case AsyncError(:final error))
+                _MessageRow(
+                  icon: Icons.sync_problem,
+                  color: AraColors.accentWarning,
+                  text: "Switch status may be stale: ${_msg(error)}",
+                  onRetry: () => ref.read(switchListProvider.notifier).refresh(),
+                ),
+              if (value.isEmpty)
+                const _EmptyState()
+              else
+                for (final d in value) _SwitchCard(device: d),
+            ],
             AsyncError(:final error) => [
               _MessageRow(
                 icon: Icons.error_outline,
@@ -259,7 +309,10 @@ class _SwitchCard extends ConsumerWidget {
             ),
             const Divider(height: 20, color: AraColors.border),
             if (device.isConnected && device.ports.isNotEmpty)
-              for (final p in device.ports) _PortRow(device: device, port: p)
+              SwitchDeviceBody(
+                device: device,
+                onWrite: (port, value) => _write(context, ref, port, value),
+              )
             else
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 4),
@@ -276,6 +329,74 @@ class _SwitchCard extends ConsumerWidget {
         ),
       ),
     );
+  }
+
+  /// Writes one port. Presentation lives in [SwitchDeviceBody]; the safety
+  /// interlock and error reporting stay here, next to the device identity the
+  /// interlock is scoped to.
+  ///
+  /// Returns whether the write actually committed. Every failure path reports
+  /// itself to the user AND answers false, so an optimistic control can snap
+  /// back rather than display a value the hardware never took.
+  Future<bool> _write(
+    BuildContext context,
+    WidgetRef ref,
+    SwitchPort port,
+    double value,
+  ) async {
+    final messenger = ScaffoldMessenger.of(context);
+    // §25.5.6 fan-off interlock — the Thermal-Switch Fan port is also
+    // reachable from this generic panel, so it must refuse a fan-off while
+    // the camera TEC is (or may be) cooling exactly like FanSwitchRow does.
+    // Range-aware: "off" is the port's own minimum (0 for a boolean port,
+    // the true idle stop for a PWM slider whose min isn't 0) — a fixed 0.5
+    // threshold would let a min=10 PWM slider reach "off" unchecked.
+    if (value <= port.min && isThermalSwitchFanPort(device, port)) {
+      final refusal = fanOffRefusal(
+        await coolerOnTriState(ref.read(cameraStatusProvider.future)),
+      );
+      if (refusal != null) {
+        messenger.showSnackBar(
+          SnackBar(
+            content: Text(refusal),
+            backgroundColor: AraColors.accentError,
+          ),
+        );
+        return false;
+      }
+    }
+    try {
+      // false = the notifier's re-entrancy guard dropped it because another
+      // change was still in flight. The grouped layout puts a slider and its
+      // mode picker in one card, so that is easy to hit by accident — say so
+      // instead of letting the control silently snap back.
+      final performed = await ref
+          .read(switchListProvider.notifier)
+          .setValue(
+            deviceId: device.deviceId,
+            portId: port.id,
+            value: value,
+          );
+      if (!performed) {
+        // _act returns false both for the re-entrancy guard and for "no active
+        // server", so word this for either — claiming another change is in
+        // flight would be wrong in the second case.
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text("The switch change wasn't sent — try again."),
+          ),
+        );
+      }
+      return performed;
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text("Couldn't set ${port.label}: ${_msg(e)}"),
+          backgroundColor: AraColors.accentError,
+        ),
+      );
+      return false;
+    }
   }
 
   Future<void> _remove(BuildContext context, WidgetRef ref) async {
@@ -331,150 +452,6 @@ class _SwitchCard extends ConsumerWidget {
         ),
       );
     }
-  }
-}
-
-/// A single port. Boolean writable → a toggle; value writable → a slider;
-/// read-only → the value as text.
-class _PortRow extends ConsumerStatefulWidget {
-  final SwitchDevice device;
-  final SwitchPort port;
-  const _PortRow({required this.device, required this.port});
-
-  @override
-  ConsumerState<_PortRow> createState() => _PortRowState();
-}
-
-class _PortRowState extends ConsumerState<_PortRow> {
-  // Local drag value for a value-slider port, so the thumb follows the finger
-  // before the write commits + the list re-reads. Synced from the port on
-  // external change (didUpdateWidget).
-  double? _dragValue;
-
-  @override
-  void didUpdateWidget(_PortRow old) {
-    super.didUpdateWidget(old);
-    if (old.port.value != widget.port.value) _dragValue = null;
-  }
-
-  Future<void> _write(double value) async {
-    final messenger = ScaffoldMessenger.of(context);
-    // §25.5.6 fan-off interlock — the Thermal-Switch Fan port is also
-    // reachable from this generic panel, so it must refuse a fan-off while
-    // the camera TEC is (or may be) cooling exactly like FanSwitchRow does.
-    // Range-aware: "off" is the port's own minimum (0 for a boolean port,
-    // the true idle stop for a PWM slider whose min isn't 0) — a fixed 0.5
-    // threshold would let a min=10 PWM slider reach "off" unchecked.
-    if (value <= widget.port.min &&
-        isThermalSwitchFanPort(widget.device, widget.port)) {
-      final refusal = fanOffRefusal(
-        await coolerOnTriState(ref.read(cameraStatusProvider.future)),
-      );
-      if (refusal != null) {
-        if (mounted) setState(() => _dragValue = null);
-        messenger.showSnackBar(
-          SnackBar(
-            content: Text(refusal),
-            backgroundColor: AraColors.accentError,
-          ),
-        );
-        return;
-      }
-    }
-    try {
-      await ref
-          .read(switchListProvider.notifier)
-          .setValue(
-            deviceId: widget.device.deviceId,
-            portId: widget.port.id,
-            value: value,
-          );
-    } catch (e) {
-      // The write was rejected, so the server value is unchanged and
-      // didUpdateWidget won't reset us — snap the slider back off the (rejected)
-      // drag position to the last confirmed value.
-      if (mounted) setState(() => _dragValue = null);
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text("Couldn't set ${widget.port.name}: ${_msg(e)}"),
-          backgroundColor: AraColors.accentError,
-        ),
-      );
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final port = widget.port;
-    final label = port.name.isEmpty ? 'Port ${port.id}' : port.name;
-
-    if (!port.canWrite) {
-      return _PortLine(label: label, trailing: Text(_fmt(port.value)));
-    }
-    if (port.isBoolean) {
-      return _PortLine(
-        label: label,
-        trailing: Switch(
-          value: port.value >= 0.5,
-          onChanged: (on) => _write(on ? port.max : port.min),
-        ),
-      );
-    }
-    // A Slider asserts min < max. A malformed device can report min == max (the
-    // ASCOM spec forbids it for a non-boolean port, but don't trust that) — fall
-    // back to a read-only value rather than crash.
-    if (port.min >= port.max) {
-      return _PortLine(label: label, trailing: Text(_fmt(port.value)));
-    }
-    final value = (_dragValue ?? port.value).clamp(port.min, port.max);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(child: Text(label)),
-              Text(
-                _fmt(value),
-                style: Theme.of(
-                  context,
-                ).textTheme.bodySmall?.copyWith(color: AraColors.textSecondary),
-              ),
-            ],
-          ),
-          Slider(
-            min: port.min,
-            max: port.max,
-            value: value.toDouble(),
-            onChanged: (v) => setState(() => _dragValue = v),
-            onChangeEnd: (v) {
-              _dragValue = v;
-              _write(v);
-            },
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _PortLine extends StatelessWidget {
-  final String label;
-  final Widget trailing;
-  const _PortLine({required this.label, required this.trailing});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      child: Row(
-        children: [
-          Expanded(child: Text(label)),
-          trailing,
-        ],
-      ),
-    );
   }
 }
 
@@ -568,9 +545,6 @@ class _MessageRow extends StatelessWidget {
     );
   }
 }
-
-String _fmt(double v) =>
-    v == v.roundToDouble() ? v.toInt().toString() : v.toStringAsFixed(2);
 
 /// Human-friendly switch error. Uses [friendlyError], which prefers the
 /// server's own human-readable `detail` (e.g. a 409 "switch ... is not

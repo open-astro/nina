@@ -43,6 +43,10 @@ class SwitchPort {
     required this.canWrite,
   });
 
+  /// Display name, falling back to the port selector when the driver reports
+  /// no name — an unnamed rail must still be distinguishable from its siblings.
+  String get label => name.isEmpty ? 'Port $id' : name;
+
   /// A two-state on/off port (range [0,1]) as opposed to a value/PWM port. ASCOM
   /// hardware can report the bounds with float noise (e.g. 0.9999999), so compare
   /// with a small epsilon rather than `==`. (A 0..1 PWM port is indistinguishable

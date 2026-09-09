@@ -944,6 +944,28 @@ const Map<String, Help> helpRegistry = {
         'Override per device based on your hardware\'s behaviour.',
   ),
 
+  'eq.switch.readings': Help(
+    key: 'eq.switch.readings',
+    title: 'Switch readings',
+    body:
+        'The read-only ports your switch device reports — everything it measures but you can\'t set.\n\n'
+        'On a power box that usually means **input voltage**, **output current** and **power draw** (a good early warning: a rail browning out under dew-heater load shows here first), plus any environmental probes — **ambient temperature/humidity**, **dew point**, and a **lens/optics temperature** from a probe taped to the tube.\n\n'
+        'Ara reads the unit from the port\'s name, because ASCOM\'s Switch interface carries no units of its own — a port your device names something unexpected shows its raw number instead of a wrong unit.\n\n'
+        'These update while the Switch panel is open, not continuously in the background.',
+  ),
+  'eq.switch.dew_mode': Help(
+    key: 'eq.switch.dew_mode',
+    title: 'Dew heater mode',
+    body:
+        'How a dew-heater channel decides its own power level.\n\n'
+        '* **Auto** — the device regulates itself, holding the optics a set margin above the measured dew point using its own ambient and lens probes. The output slider becomes a readout of what the controller chose. Best for unattended runs.\n'
+        '* **Manual** — you set the duty cycle with the slider (0-100%) and the device holds it. Use when you know the heat your optics need, or when a probe is missing/unreliable.\n'
+        '* **Switch** — the channel stops being a heater and behaves as a plain on/off 12 V output, so you can hang a non-heater accessory off it.\n\n'
+        '**Too much heat is not free:** over-driving a heater warms the air in front of the objective and can soften your stars. Auto, or the lowest manual setting that keeps the glass clear, beats running at 100%.\n\n'
+        'In **Auto** the output is the controller\'s to set, so Ara shows it as a reading rather than a slider — switch to Manual to drive it yourself.\n\n'
+        'Not every device names its modes this way — Ara shows these labels for the common 0/1/2 convention and falls back to raw numbers otherwise.',
+  ),
+
   // §37.11 Autofocus — help on the genuinely non-obvious controls.
   'img.autofocus.method': Help(
     key: 'img.autofocus.method',
