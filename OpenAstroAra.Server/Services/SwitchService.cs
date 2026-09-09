@@ -51,8 +51,8 @@ public sealed partial class SwitchService : ISwitchService, IDisposable {
 
     private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(2);
 
-    /// <summary>Refresh ticks a freshly-connected switch gets before an unreadable-ports
-    /// observation counts against it (§42.3). Covers USB re-enumeration and drivers that
+    /// <summary>Unreadable-ports observations a freshly-connected switch gets for free before
+    /// they start counting against it (§42.3). Covers USB re-enumeration and drivers that
     /// answer Connected before their first status frame has landed.</summary>
     private const int PortReadGraceTicks = 2;
 
@@ -98,9 +98,11 @@ public sealed partial class SwitchService : ISwitchService, IDisposable {
         // streak so a transient read burst can't tear down a switch whose Connected is
         // still answering. Cleared whenever a pass reads ports successfully.
         public DeviceConnectionProbe PortsProbe { get; } = new(PortsLostThreshold);
-        // §42.3 — refresh ticks since this connection went Connected, so the weaker
-        // ports-unreadable signal can skip a warming-up device. Reset with the probe.
-        public int TicksSinceConnect { get; set; }
+        // §42.3 — UNREADABLE observations seen since this connection went Connected (not
+        // every refresh tick: a pass that reads ports fine doesn't spend the budget), so a
+        // warming-up device gets its first few bad ticks forgiven however far apart they
+        // fall. Reset with the probe.
+        public int UnreadableTicksSinceConnect { get; set; }
         // §42.4 — per-connection commanded-value read-back watch (only ports the daemon wrote).
         public SwitchReadbackWatch Readback { get; } = new();
     }
@@ -469,7 +471,7 @@ public sealed partial class SwitchService : ISwitchService, IDisposable {
                     conn.CachedSnapshots = Array.Empty<SwitchPortSnapshot>(); // don't serve a prior device's ports
                     conn.Probe.Reset();    // §42.3 — a fresh session starts a fresh streak
                     conn.PortsProbe.Reset();
-                    conn.TicksSinceConnect = 0;  // and a fresh ports-unreadable grace window
+                    conn.UnreadableTicksSinceConnect = 0;  // and a fresh ports-unreadable grace window
                     conn.Readback.Reset(); // §42.4 — a fresh session has no commanded values
                     SetState(conn, EquipmentConnectionState.Connected);
                     adopted = true;
@@ -664,12 +666,12 @@ public sealed partial class SwitchService : ISwitchService, IDisposable {
                 || !ReferenceEquals(conn.Client, client)) {
                 return null;
             }
-            conn.TicksSinceConnect++;
+            conn.UnreadableTicksSinceConnect++;
             // Give a freshly-connected device a few ticks before counting these
             // against it: a USB re-enumeration or a driver that answers Connected
             // before its first status frame would otherwise be torn down while it
             // is still coming up.
-            if (conn.TicksSinceConnect <= PortReadGraceTicks) {
+            if (conn.UnreadableTicksSinceConnect <= PortReadGraceTicks) {
                 return null;
             }
             return conn.PortsProbe.Observe(probeSucceeded: false);
@@ -704,7 +706,7 @@ public sealed partial class SwitchService : ISwitchService, IDisposable {
             SetState(conn, EquipmentConnectionState.Error);
             conn.Probe.Reset();
             conn.PortsProbe.Reset();
-            conn.TicksSinceConnect = 0;
+            conn.UnreadableTicksSinceConnect = 0;
             conn.Readback.Reset();
         }
         LogConnectionLost(conn.Device.Name);
