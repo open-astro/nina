@@ -51,6 +51,17 @@ public sealed partial class SwitchService : ISwitchService, IDisposable {
 
     private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(2);
 
+    /// <summary>Refresh ticks a freshly-connected switch gets before an unreadable-ports
+    /// observation counts against it (§42.3). Covers USB re-enumeration and drivers that
+    /// answer Connected before their first status frame has landed.</summary>
+    private const int PortReadGraceTicks = 2;
+
+    /// <summary>Consecutive unreadable-ports ticks before a device that still answers
+    /// <c>Connected</c> is declared lost (§42.3). Deliberately longer than the hard probe's
+    /// three: this signal fires on ordinary read failures, which recover on their own far
+    /// more often than a dead transport does. ≈20 s at the 2 s refresh interval.</summary>
+    private const int PortsLostThreshold = 10;
+
     private readonly ILogger<SwitchService> _logger;
     private readonly EquipmentEventPublisher? _events;
     private readonly IEquipmentFaultSink? _faults;
@@ -83,6 +94,13 @@ public sealed partial class SwitchService : ISwitchService, IDisposable {
         // §42.3 — per-connection disconnect-detection streak (multi-instance: each connected switch
         // is probed independently). Only touched from the single-flighted refresh path.
         public DeviceConnectionProbe Probe { get; } = new();
+        // §42.3 — the weaker "advertises ports, delivers none" signal, on its own longer
+        // streak so a transient read burst can't tear down a switch whose Connected is
+        // still answering. Cleared whenever a pass reads ports successfully.
+        public DeviceConnectionProbe PortsProbe { get; } = new(PortsLostThreshold);
+        // §42.3 — refresh ticks since this connection went Connected, so the weaker
+        // ports-unreadable signal can skip a warming-up device. Reset with the probe.
+        public int TicksSinceConnect { get; set; }
         // §42.4 — per-connection commanded-value read-back watch (only ports the daemon wrote).
         public SwitchReadbackWatch Readback { get; } = new();
     }
@@ -284,11 +302,40 @@ public sealed partial class SwitchService : ISwitchService, IDisposable {
                     }
                     continue; // this device didn't answer — skip its reads, not the whole tick
                 }
-                ObserveProbeIfLive(conn, client, probeSucceeded: true);
                 // Isolate each device: a read failure (ASCOM timeout / network hiccup) on one switch
                 // must not drop the rest of this tick's devices from the refresh.
                 try {
-                    var ports = ReadPorts(client);
+                    var (advertised, ports) = ReadPorts(client);
+                    // §42.3 — `Connected` alone is not proof of life. A bridge may implement it as
+                    // PER-CLIENT session state (our session stays "connected" no matter what the
+                    // hardware is doing), and a driver may keep serving static metadata — MaxSwitch,
+                    // GetSwitchName — from a table while the link to the device is dead. Observed on
+                    // a Gemini PDH ADV3 after a USB replug: Connected true, MaxSwitch 24, and every
+                    // GetSwitchValue throwing "communications compromised". The device advertised 24
+                    // ports and delivered none, yet stayed Connected forever with an empty card.
+                    // So: advertising ports but reading none counts as a failed probe, and the same
+                    // consecutive-failure streak declares it lost.
+                    // A device is failing this probe when it won't say how many
+                    // ports it has, or claims some and delivers none.
+                    var unreadable = PortsUnreadable(advertised, ports.Count);
+                    // This signal is WEAKER than the `Connected` probe and gets its
+                    // own, longer streak: `Connected` is often served from the
+                    // bridge's session state and keeps succeeding through a stall,
+                    // so a transient burst of failing value reads (a bridge under
+                    // load, a brief network stall, a driver reload) must not tear a
+                    // working switch down to Error and demand a manual Reconnect.
+                    // The tick counter and the streak are both mutated under _gate
+                    // with the live-connection guard, so a concurrent reconnect's
+                    // reset can't be clobbered by an in-flight slow read.
+                    if (unreadable) {
+                        var verdict = ObservePortsProbeIfLive(conn, client);
+                        if (verdict == ProbeVerdict.Lost) {
+                            LogPortsUnreadable(conn.Device.Name, advertised ?? -1);
+                            TripConnectionLost(conn);
+                        }
+                        continue; // no ports to cache either way
+                    }
+                    ObserveProbeIfLive(conn, client, probeSucceeded: true);
                     List<(SwitchPortSnapshot Port, double Commanded)>? mismatched = null;
                     List<(short PortId, double Commanded)>? recommand = null;
                     lock (_gate) {
@@ -346,13 +393,18 @@ public sealed partial class SwitchService : ISwitchService, IDisposable {
     // than failing the whole snapshot.
     [SuppressMessage("Design", "CA1031:Do not catch general exception types",
         Justification = "Per-port read boundary: a switch port read can throw driver/HTTP exceptions; that port is skipped, never propagated. CA1031's log-and-recover boundary applies.")]
-    private IReadOnlyList<SwitchPortSnapshot> ReadPorts(AlpacaSwitch c) {
+    private (short? Advertised, IReadOnlyList<SwitchPortSnapshot> Ports) ReadPorts(AlpacaSwitch c) {
         short max;
         try {
             max = c.MaxSwitch;
         } catch (Exception ex) {
             LogPortReadFailed(ex);
-            return Array.Empty<SwitchPortSnapshot>();
+            // null, NOT 0: "the device never told us" must stay distinguishable
+            // from "the device says it has no ports". Reporting 0 here would let
+            // a device whose metadata read fails fall through to a SUCCESSFUL
+            // probe, resetting the streak every tick so it could never trip —
+            // exactly the state this detection exists to catch.
+            return (null, Array.Empty<SwitchPortSnapshot>());
         }
         var ports = new List<SwitchPortSnapshot>(max);
         for (short i = 0; i < max; i++) {
@@ -370,7 +422,7 @@ public sealed partial class SwitchService : ISwitchService, IDisposable {
                 LogPortUnavailable(i, ex);
             }
         }
-        return ports;
+        return (max, ports);
     }
 
     [SuppressMessage("Design", "CA1031:Do not catch general exception types",
@@ -416,6 +468,8 @@ public sealed partial class SwitchService : ISwitchService, IDisposable {
                     conn.Client = client;
                     conn.CachedSnapshots = Array.Empty<SwitchPortSnapshot>(); // don't serve a prior device's ports
                     conn.Probe.Reset();    // §42.3 — a fresh session starts a fresh streak
+                    conn.PortsProbe.Reset();
+                    conn.TicksSinceConnect = 0;  // and a fresh ports-unreadable grace window
                     conn.Readback.Reset(); // §42.4 — a fresh session has no commanded values
                     SetState(conn, EquipmentConnectionState.Connected);
                     adopted = true;
@@ -588,6 +642,40 @@ public sealed partial class SwitchService : ISwitchService, IDisposable {
     [LoggerMessage(Level = LogLevel.Warning, Message = "Switch '{Device}' port {PortId} ('{PortName}') read-back disagrees with the commanded value: commanded {Commanded}, reads {ReadBack} — §42.4 fault published")]
     private partial void LogValueMismatch(string device, short portId, string portName, double commanded, double readBack);
 
+    /// <summary>Whether this tick's read means the device is not answering for its ports:
+    /// it would not report a count (null), or it claims some and delivered none. Pure so the
+    /// §42.3 rule is testable without an Alpaca device.</summary>
+    internal static bool PortsUnreadable(short? advertised, int portsRead) =>
+        advertised is null || (advertised > 0 && portsRead == 0);
+
+    /// <summary>§42.3 — observe the weaker ports-unreadable signal against the live connection.
+    /// Advances the post-connect grace counter and the dedicated streak in ONE critical section
+    /// under <c>_gate</c>, with the same live-connection guard the other refresh-path mutations
+    /// use: the reads happen off-lock and can take seconds, so an unguarded read-modify-write
+    /// here could wipe a concurrent reconnect's reset and rob a re-enumerating device of its
+    /// grace window. Returns null while still inside the grace window or when the probed pair
+    /// is stale (the observation is discarded).</summary>
+    private ProbeVerdict? ObservePortsProbeIfLive(SwitchConnection conn, AlpacaSwitch client) {
+        lock (_gate) {
+            if (_disposed
+                || conn.State != EquipmentConnectionState.Connected
+                || !_connections.TryGetValue(conn.Key, out var current)
+                || !ReferenceEquals(current, conn)
+                || !ReferenceEquals(conn.Client, client)) {
+                return null;
+            }
+            conn.TicksSinceConnect++;
+            // Give a freshly-connected device a few ticks before counting these
+            // against it: a USB re-enumeration or a driver that answers Connected
+            // before its first status frame would otherwise be torn down while it
+            // is still coming up.
+            if (conn.TicksSinceConnect <= PortReadGraceTicks) {
+                return null;
+            }
+            return conn.PortsProbe.Observe(probeSucceeded: false);
+        }
+    }
+
     private ProbeVerdict? ObserveProbeIfLive(SwitchConnection conn, AlpacaSwitch client, bool probeSucceeded) {
         lock (_gate) {
             if (_disposed
@@ -596,6 +684,9 @@ public sealed partial class SwitchService : ISwitchService, IDisposable {
                 || !ReferenceEquals(current, conn)
                 || !ReferenceEquals(conn.Client, client)) {
                 return null;
+            }
+            if (probeSucceeded) {
+                conn.PortsProbe.Reset();
             }
             return conn.Probe.Observe(probeSucceeded);
         }
@@ -612,6 +703,8 @@ public sealed partial class SwitchService : ISwitchService, IDisposable {
             }
             SetState(conn, EquipmentConnectionState.Error);
             conn.Probe.Reset();
+            conn.PortsProbe.Reset();
+            conn.TicksSinceConnect = 0;
             conn.Readback.Reset();
         }
         LogConnectionLost(conn.Device.Name);
@@ -667,6 +760,9 @@ public sealed partial class SwitchService : ISwitchService, IDisposable {
         }
         GC.SuppressFinalize(this);
     }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Switch '{Device}' advertises {Advertised} ports but none could be read (-1 = it would not report a count) — treating as disconnected (§42.3)")]
+    private partial void LogPortsUnreadable(string device, short advertised);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Switch port read failed")]
     private partial void LogPortReadFailed(Exception ex);
