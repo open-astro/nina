@@ -35,8 +35,18 @@ class _FakeSwitchApi implements SwitchClient {
   /// Thrown by [setValue] when set, to exercise the error copy.
   final Object? setValueError;
 
+  /// Thrown by the NEXT [getAll] only, to exercise a transient poll failure.
+  Object? getAllErrorOnce;
+
   @override
-  Future<List<SwitchDevice>> getAll() async => devices;
+  Future<List<SwitchDevice>> getAll() async {
+    final err = getAllErrorOnce;
+    if (err != null) {
+      getAllErrorOnce = null;
+      throw err;
+    }
+    return devices;
+  }
   @override
   Future<void> connect(DiscoveredDevice device) async =>
       calls.add('connect:${device.alpacaDeviceNumber}');
@@ -155,6 +165,94 @@ void main() {
     await tester.pump(); // resolve the refresh getAll
     expect(find.text('Connected'), findsOneWidget);
     expect(find.text('Connecting'), findsNothing);
+  });
+
+  testWidgets('a failed telemetry poll keeps the cards and warns inline', (
+    tester,
+  ) async {
+    // The panel re-reads every ~3 s to keep telemetry live. A single 500 or
+    // timeout must not blank every card out from under a user mid-interaction.
+    final api = _FakeSwitchApi([
+      _device(const [
+        SwitchPort(
+            id: 0, name: 'DC2', value: 1, min: 0, max: 1, canWrite: true),
+        SwitchPort(
+            id: 1, name: 'Input Voltage', value: 12.6, min: 0, max: 30,
+            canWrite: false),
+      ], state: SwitchConnectionState.connected),
+    ]);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          serverLinkUpProvider.overrideWith((ref) => true),
+          savedServerServiceProvider.overrideWithValue(
+            _FakeSavedServerService(const [
+              AraServer(hostname: 'h', port: 5555),
+            ]),
+          ),
+          switchApiFactoryProvider.overrideWithValue((_) => api),
+        ],
+        child: const MaterialApp(home: Scaffold(body: EquipmentSwitchPanel())),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('DC2'), findsOneWidget);
+
+    // The next telemetry poll fails.
+    api.getAllErrorOnce = Exception('boom');
+    await tester.pump(const Duration(milliseconds: 1600));
+    await tester.pump(const Duration(milliseconds: 1600));
+    await tester.pump();
+    expect(find.text('DC2'), findsOneWidget, reason: 'cards must survive');
+    expect(find.textContaining('may be stale'), findsOneWidget);
+  });
+
+  testWidgets('a connected switch with no ports yet polls until they arrive', (
+    tester,
+  ) async {
+    // The daemon flips to `connected` as soon as the Alpaca link opens, BEFORE
+    // it has enumerated ports. The old poll stopped the moment nothing was
+    // `connecting`, so the card stuck on "No ports reported by this switch"
+    // until the user left the panel and came back.
+    final api = _FakeSwitchApi([
+      _device(const [], state: SwitchConnectionState.connected),
+    ]);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          serverLinkUpProvider.overrideWith((ref) => true),
+          savedServerServiceProvider.overrideWithValue(
+            _FakeSavedServerService(const [
+              AraServer(hostname: 'h', port: 5555),
+            ]),
+          ),
+          switchApiFactoryProvider.overrideWithValue((_) => api),
+        ],
+        child: const MaterialApp(home: Scaffold(body: EquipmentSwitchPanel())),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('No ports reported by this switch.'), findsOneWidget);
+
+    // The daemon finishes enumerating.
+    api.devices = [
+      _device(const [
+        SwitchPort(
+          id: 0,
+          name: 'DC2',
+          value: 1,
+          min: 0,
+          max: 1,
+          canWrite: true,
+        ),
+      ], state: SwitchConnectionState.connected),
+    ];
+    await tester.pump(const Duration(milliseconds: 1600));
+    await tester.pump();
+    expect(find.text('No ports reported by this switch.'), findsNothing);
+    expect(find.text('DC2'), findsOneWidget);
   });
 
   testWidgets('empty list shows the empty state + Add switch', (tester) async {

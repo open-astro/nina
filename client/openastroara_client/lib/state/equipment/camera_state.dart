@@ -98,7 +98,8 @@ class CameraStatusNotifier extends EquipmentDeviceNotifier<CameraStatus> {
     // Write the port's own bounds, not a literal 1/0: on a PWM fan port
     // (range 0–100) a hard-coded 1.0 would set ~1% speed — nearly off —
     // while the TEC cools. max = full fan, min = off, and for a boolean
-    // port they're exactly 1/0. Matches _PortRow's boolean toggle.
+    // port they're exactly 1/0. Matches the Switches panel's boolean toggle
+    // (SwitchDeviceBody's _ToggleRow).
     final written = await ref.read(switchListProvider.notifier).setValue(
           deviceId: fan.device.deviceId,
           portId: fan.port.id,

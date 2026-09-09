@@ -34,6 +34,36 @@ namespace OpenAstroAra.Test {
             new(uid, $"Unreachable {deviceNumber}", DeviceType.Switch,
                 host, "127.0.0.1", 1, deviceNumber, false);
 
+        // §42.3 — the ports-unreadable rule the refresh tick feeds into the weak-signal
+        // streak. Pure, so it is testable without an Alpaca device (the tick around it
+        // needs a live OmniSim; the companion Integration test covers that path).
+
+        [Test]
+        public void PortsUnreadable_when_the_device_will_not_report_a_count() {
+            // null must NOT read as 0: a MaxSwitch that throws is "no answer", and
+            // treating it as "this device has no ports" would let a dead device fall
+            // through to a SUCCESSFUL probe that resets the streak on every tick.
+            Assert.That(SwitchService.PortsUnreadable(advertised: null, portsRead: 0), Is.True);
+        }
+
+        [Test]
+        public void PortsUnreadable_when_ports_are_advertised_but_none_read() {
+            Assert.That(SwitchService.PortsUnreadable(advertised: 24, portsRead: 0), Is.True);
+        }
+
+        [Test]
+        public void PortsUnreadable_is_false_for_a_device_that_genuinely_has_no_ports() {
+            Assert.That(SwitchService.PortsUnreadable(advertised: 0, portsRead: 0), Is.False);
+        }
+
+        [Test]
+        public void PortsUnreadable_is_false_when_any_port_was_read() {
+            // A partially-readable device is degraded, not lost — the per-port skips
+            // already keep the readable ones.
+            Assert.That(SwitchService.PortsUnreadable(advertised: 24, portsRead: 1), Is.False);
+            Assert.That(SwitchService.PortsUnreadable(advertised: 24, portsRead: 24), Is.False);
+        }
+
         [Test]
         public async Task GetAll_is_empty_and_GetAsync_is_null_before_any_device_is_connected() {
             using var svc = new SwitchService();
