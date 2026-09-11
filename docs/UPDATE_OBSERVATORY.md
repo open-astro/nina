@@ -25,7 +25,7 @@ Password is never stored in source or passed in command arguments. SSH key plus 
 
 Run as the normal client user. Do not invoke this script with `sudo`: it changes `HOME`, can hide the required Flutter/.NET tools, and installs the client under `/root`. Interactive runs prompt for `OPENASTRO_PASSWORD` when no SSH key path is configured; press Enter at that prompt only when key authentication and passwordless SBC sudo are ready.
 
-Online mode needs SBC internet access, ARM64 Debian with package build dependencies available (Trixie for libgpiod 2), sudo permission, and enough disk/memory for three source trees, packages, and backups. Default compilation parallelism is 2; change with `--jobs`. Dependency installation can update build/runtime libraries even under `--build-only`; no application deployment or intentional service stop occurs in that mode.
+Online mode needs SBC internet access, ARM64 Debian with package build dependencies available (Trixie for libgpiod 2), sudo permission, and enough disk/memory for three source trees, packages, and backups. The updater refuses to stage when `/home` has less than 4 GiB free. Default compilation parallelism is 2; change with `--jobs`. Dependency installation can update build/runtime libraries even under `--build-only`; no application deployment or intentional service stop occurs in that mode.
 
 ### SBC Wi-Fi has no upstream internet
 
@@ -67,7 +67,13 @@ To update them in the same run, prepare a directory containing an executable ARM
 
 ## Recovery and results
 
-Local run artifacts: `${OPENASTRO_UPDATE_DIR:-$HOME/.cache/openastro-update}/run-*`. SBC artifacts/backups: `/home/USER/.cache/openastro-update/run-*`. Directories are private. Keep sufficient free space; the script does not delete previous runs.
+Local run artifacts: `${OPENASTRO_UPDATE_DIR:-$HOME/.cache/openastro-update}/run-*`. SBC artifacts/backups: `/home/USER/.cache/openastro-update/run-*`. Directories are private. Keep sufficient free space; the script does not delete previous runs. If preflight reports no space, inspect first:
+
+```bash
+ssh astro@172.24.1.1 'df -h /home; du -xhd1 /home/astro/.cache /home/astro 2>/dev/null | sort -h | tail -20'
+```
+
+Delete only failed or obsolete update runs after checking backup contents. When safe, clear package and old journal data with `sudo apt-get clean` and `sudo journalctl --vacuum-time=7d` on the SBC.
 
 All application builds/tests must finish before service stops. Package maintainer starts are suppressed during installation. Failure after service stops leaves services stopped; if server binaries were replaced, the old binaries are restored. Package changes and database migrations are **not** automatically rolled back. Inspect retained service definitions, package inventory, state backup, and journal before recovery. Restore matching databases and binaries together; never start an old server against an incompatible migrated database. The state backup excludes `/frames/` and `/logs/`, preserving captures in place.
 

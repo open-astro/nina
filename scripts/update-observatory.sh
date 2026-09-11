@@ -258,7 +258,12 @@ HELP
         ssh_base+=(-o BatchMode=yes)
         scp_base+=(-o BatchMode=yes)
     fi
-    local target="$user@$host" run remote_dir
+    local target="$user@$host" run remote_dir remote_free_kib
+    remote_free_kib=$("${ssh_base[@]}" "$target" "df -Pk /home/$user | awk 'NR==2 {print \$4}'") || \
+        fail "cannot inspect SBC free space; check SSH and sudo access"
+    [[ $remote_free_kib =~ ^[0-9]+$ ]] || fail "invalid SBC free-space report: $remote_free_kib"
+    (( remote_free_kib >= 4194304 )) || fail "SBC needs at least 4 GiB free on /home; reported ${remote_free_kib} KiB. Remove old update runs or other files, then retry."
+    log "SBC free space: ${remote_free_kib} KiB"
     mkdir -p "$workspace"
     run=$(mktemp -d "$workspace/run-XXXXXXXX")
     remote_dir="/home/$user/.cache/openastro-update/${run##*/}"
