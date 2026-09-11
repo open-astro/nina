@@ -236,11 +236,17 @@ HELP
     [[ $host =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ && $user =~ ^[a-z_][a-z0-9_-]*$ ]] || fail 'invalid SSH destination'
     [[ $jobs =~ ^[1-9][0-9]*$ ]] || fail '--jobs must be positive integer'
     [[ $(uname -s) == Linux ]] || fail 'this updater builds the local Linux client'
+    [[ $EUID -ne 0 ]] || fail 'do not run with sudo; run as the client user so HOME and Flutter stay correct'
     log "SBC: $user@$host; native jobs: $jobs"
     log "ARA: $ara_url $ara_ref; bridge: $bridge_url $bridge_ref; guider: $guider_url $guider_ref"
     log "Client: $install_dir; mode: $mode; offline: $offline; solver/database: ${astap_dir:-preserve existing}"
     [[ $mode != plan ]] || return 0
     for cmd in git ssh scp tar python3 curl file rsync "$dotnet" "$flutter"; do need "$cmd"; done
+    if [[ -z ${OPENASTRO_PASSWORD:-} && -t 0 ]]; then
+        read -rsp 'SBC SSH/sudo password (blank when SSH key + passwordless sudo): ' OPENASTRO_PASSWORD
+        printf '\n'
+        export OPENASTRO_PASSWORD
+    fi
     local -a ssh_base=(ssh -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o StrictHostKeyChecking=accept-new)
     local -a scp_base=(scp -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
     if [[ -n ${OPENASTRO_PASSWORD:-} ]]; then
