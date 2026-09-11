@@ -269,9 +269,9 @@ HELP
                     source_root=$(dirname "$source_root")
             fi
             case $name in
-                ara) [[ -d $url/.git ]] || source="$source_root/openastro-ara" ;;
-                bridge) [[ -d $url/.git ]] || source="$source_root/AlpacaBridge" ;;
-                guider) [[ -d $url/.git ]] || source="$source_root/openastro-guider" ;;
+                ara) [[ -e $url/.git ]] || source="$source_root/openastro-ara" ;;
+                bridge) [[ -e $url/.git ]] || source="$source_root/AlpacaBridge" ;;
+                guider) [[ -e $url/.git ]] || source="$source_root/openastro-guider" ;;
             esac
             [[ -e $source/.git ]] || fail "offline source missing: $source"
             # Worktrees use a .git file, and the cache may be on another mount;
