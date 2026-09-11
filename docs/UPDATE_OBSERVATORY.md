@@ -23,6 +23,8 @@ unset OPENASTRO_PASSWORD
 
 Password is never stored in source or passed in command arguments. SSH key plus passwordless sudo also works without the variable. Host keys use `accept-new`: new hosts are enrolled; changed keys fail. Existing local SSH configuration still applies.
 
+Run as the normal client user. Do not invoke this script with `sudo`: it changes `HOME`, can hide the required Flutter/.NET tools, and installs the client under `/root`. Interactive runs prompt for `OPENASTRO_PASSWORD` when no SSH key path is configured; press Enter at that prompt only when key authentication and passwordless SBC sudo are ready.
+
 Online mode needs SBC internet access, ARM64 Debian with package build dependencies available (Trixie for libgpiod 2), sudo permission, and enough disk/memory for three source trees, packages, and backups. Default compilation parallelism is 2; change with `--jobs`. Dependency installation can update build/runtime libraries even under `--build-only`; no application deployment or intentional service stop occurs in that mode.
 
 ### SBC Wi-Fi has no upstream internet
