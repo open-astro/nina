@@ -20,6 +20,13 @@ class UpdaterTests(unittest.TestCase):
             self.assertFalse(Path(env['OPENASTRO_UPDATE_DIR']).exists())
             self.assertIn('astro@172.24.1.1', result.stdout)
 
+    def test_offline_plan_is_successful_without_tools_or_network(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = dict(os.environ, DOTNET='/missing/dotnet', FLUTTER='/missing/flutter')
+            result = self.run_script('--offline', '--plan', '--source-root', d, env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('offline: 1', result.stdout)
+
     def test_rejects_bad_inputs_before_network(self):
         for args in [('--jobs', '0'), ('--host', 'host;touch /tmp/bad'),
                      ('--user', '-oProxyCommand=bad'), ('--ara-ref',), ('--unknown',)]:

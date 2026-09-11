@@ -31,7 +31,7 @@ remote_sudo() {
 }
 
 remote_main() {
-    local phase=$1 stage=$2 jobs=$3
+    local phase=$1 stage=$2 jobs=$3 offline=${4:-0}
     # Password arrives as data on stdin, never shell syntax or process arguments.
     IFS= read -r sudo_password || true
     [[ $stage == /home/*/.cache/openastro-update/run-* ]] || fail 'unexpected remote stage'
@@ -39,9 +39,17 @@ remote_main() {
     [[ $(dpkg --print-architecture) == arm64 ]] || fail 'SBC must run arm64 Debian'
     remote_sudo true
     if [[ $phase == build ]]; then
-        remote_sudo apt-get update
-        remote_sudo apt-get install -y --no-remove build-essential cmake ninja-build ccache \
-            dpkg-dev debhelper pkg-config python3 curl rsync libcfitsio-dev
+        if [[ $offline == 0 ]]; then
+            remote_sudo apt-get update
+            remote_sudo apt-get install -y --no-remove build-essential cmake ninja-build ccache \
+                dpkg-dev debhelper pkg-config python3 curl rsync \
+                libcfitsio-dev libusb-1.0-0-dev libudev-dev libgpiod-dev \
+                libhidapi-dev nlohmann-json3-dev zlib1g-dev libsystemd-dev \
+                libcurl4-openssl-dev libwxgtk3.2-dev libopencv-dev libv4l-dev \
+                libcurl4-gnutls-dev libeigen3-dev libgtest-dev
+        else
+            log 'Offline SBC build: using installed compiler and dependencies.'
+        fi
         # Read Build-Depends from the actual pinned source trees.
         python3 bridge/scripts/changelog_to_deb.py --changelog bridge/CHANGELOG.md \
             --out bridge/debian/changelog --package alpacabridge \
@@ -50,7 +58,6 @@ remote_main() {
             --out guider/debian/changelog --package openastro-guider \
             --version "$(awk '/^[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+[^[:space:]]*[[:space:]]*$/ {gsub(/[[:space:]]/, ""); print; exit}' guider/version.md)" \
             --maintainer 'OpenAstro <support@openastro.net>'
-        remote_sudo apt-get build-dep -y --no-remove ./bridge ./guider
         (cd bridge && PARALLEL="$jobs" bash scripts/build_deb.sh -j"$jobs")
         # Invoke the package's underlying build flow without interactive sudo.
         (cd guider
@@ -77,11 +84,13 @@ remote_main() {
     [[ -f BUILD_COMPLETE ]] || fail 'remote build incomplete'
     local executable service_user server_dir backup path
     executable=$(systemctl show openastroara-server -p ExecStart --value)
-    case "$executable" in
-        *'path=/opt/openastroara/server/OpenAstroAra.Server ;'*) server_dir=/opt/openastroara/server ;;
-        *'path=/opt/openastroara/OpenAstroAra.Server ;'*) server_dir=/opt/openastroara ;;
-        *) fail 'unsupported ARA ExecStart; preserve custom install and configure updater first' ;;
-    esac
+    if [[ $executable == *'/opt/openastroara/server/OpenAstroAra.Server'* ]]; then
+        server_dir=/opt/openastroara/server
+    elif [[ $executable == *'/opt/openastroara/OpenAstroAra.Server'* ]]; then
+        server_dir=/opt/openastroara
+    else
+        fail 'unsupported ARA ExecStart; preserve custom install and configure updater first'
+    fi
     service_user=$(systemctl show openastroara-server -p User --value)
     [[ -n $service_user && $service_user != root ]] || fail 'ARA service user missing/root'
     # Existing installation only. Preserve custom systemd units and profile locations.
@@ -174,7 +183,7 @@ PY
 }
 
 main() {
-    local mode=update host=172.24.1.1 user=astro jobs=2
+    local mode=update host=172.24.1.1 user=astro jobs=2 offline=0 source_root=''
     local ara_url=https://github.com/open-astro/openastro-ara.git ara_ref=HEAD
     local bridge_url=https://github.com/open-astro/AlpacaBridge.git bridge_ref=HEAD
     local guider_url=https://github.com/open-astro/openastro-guider.git guider_ref=HEAD
@@ -185,6 +194,10 @@ main() {
         case $1 in
             --plan) mode=plan; shift ;;
             --build-only) mode=build; shift ;;
+            --offline) offline=1; shift ;;
+            --source-root)
+                (($# >= 2)) || fail 'missing value for --source-root'
+                source_root=$2; shift 2 ;;
             --host|--user|--jobs|--ara-url|--ara-ref|--bridge-url|--bridge-ref|--guider-url|--guider-ref|--astap-dir)
                 (($# >= 2)) || fail "missing value for $1"
                 case $1 in
@@ -202,15 +215,19 @@ Default: build/test all components, update SBC, install local Linux client.
 Run only when equipment is idle; service restarts interrupt imaging/guiding.
 --host HOST --user USER       defaults: 172.24.1.1 / astro
 --jobs N                      default: 2 (SBC memory budget)
+--offline                     use local source/dependency caches; no downloads
+--source-root DIR             local sibling checkouts for --offline
 --ara-url URL --ara-ref REF    default: upstream HEAD; accepts PR refs/commit IDs
 --bridge-url URL --bridge-ref REF
 --guider-url URL --guider-ref REF
 --astap-dir DIR               optional prepared ARM64 astap_cli + star database
 Environment: DOTNET, FLUTTER, OPENASTRO_PASSWORD, OPENASTRO_UPDATE_DIR,
              OPENASTRO_CLIENT_DIR. Password omitted: SSH key + passwordless sudo.
---plan performs no network access, builds, or deployment.
+--plan performs no network access, builds, or deployment. --offline requires
+preinstalled SBC build dependencies and cached local .NET/Flutter packages.
 Prerequisites: Linux client build tools, .NET from global.json, pinned Flutter;
-SBC: existing ARM64 Debian installation, SSH, sudo, internet, free build space.
+SBC: existing ARM64 Debian installation, SSH, sudo, free build space. Online
+mode downloads source and SBC packages; offline mode does not.
 HELP
                 return ;;
             *) fail "unknown option: $1" ;;
@@ -221,7 +238,7 @@ HELP
     [[ $(uname -s) == Linux ]] || fail 'this updater builds the local Linux client'
     log "SBC: $user@$host; native jobs: $jobs"
     log "ARA: $ara_url $ara_ref; bridge: $bridge_url $bridge_ref; guider: $guider_url $guider_ref"
-    log "Client: $install_dir; mode: $mode; solver/database: ${astap_dir:-preserve existing}"
+    log "Client: $install_dir; mode: $mode; offline: $offline; solver/database: ${astap_dir:-preserve existing}"
     [[ $mode != plan ]] || return 0
     for cmd in git ssh scp tar python3 curl file rsync "$dotnet" "$flutter"; do need "$cmd"; done
     local -a ssh_base=(ssh -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o StrictHostKeyChecking=accept-new)
@@ -243,9 +260,29 @@ HELP
     "${ssh_base[@]}" "$target" "$(quote_command mkdir -p "$remote_dir")"
     snapshot() {
         local name=$1 url=$2 ref=$3
-        git clone --no-checkout -- "$url" "$run/$name"
-        git -C "$run/$name" fetch origin "$ref"
-        git -C "$run/$name" checkout --detach FETCH_HEAD
+        local source=$url
+        if (( offline )); then
+            if [[ -z $source_root ]]; then
+                source_root=${OPENASTRO_SOURCE_ROOT:-$(pwd)}
+                [[ -d $source_root/openastro-ara/.git ]] || \
+                    [[ ! -d "$(dirname "$source_root")/openastro-ara/.git" ]] || \
+                    source_root=$(dirname "$source_root")
+            fi
+            case $name in
+                ara) [[ -d $url/.git ]] || source="$source_root/openastro-ara" ;;
+                bridge) [[ -d $url/.git ]] || source="$source_root/AlpacaBridge" ;;
+                guider) [[ -d $url/.git ]] || source="$source_root/openastro-guider" ;;
+            esac
+            [[ -e $source/.git ]] || fail "offline source missing: $source"
+            # Worktrees use a .git file, and the cache may be on another mount;
+            # avoid hard-link failures while making an immutable snapshot.
+            git clone --local --no-hardlinks --no-checkout -- "$source" "$run/$name"
+            git -C "$run/$name" checkout --detach "$ref"
+        else
+            git clone --no-checkout -- "$url" "$run/$name"
+            git -C "$run/$name" fetch origin "$ref"
+            git -C "$run/$name" checkout --detach FETCH_HEAD
+        fi
         [[ ! -f $run/$name/.gitmodules ]] || fail 'submodule repository requires explicit snapshot support'
         printf '%s %s\n' "$name" "$(git -C "$run/$name" rev-parse HEAD)" >> "$run/revisions.txt"
     }
@@ -257,12 +294,18 @@ HELP
     actual=$("$flutter" --version --machine | python3 -c 'import json,sys; print(json.load(sys.stdin)["frameworkVersion"])')
     [[ $actual == "$pinned" ]] || fail "Flutter $pinned required; found $actual. Set FLUTTER to pinned SDK."
     (cd "$run/ara"
-     "$dotnet" test OpenAstroAra.Test/OpenAstroAra.Test.csproj --filter \
+     if (( offline )); then
+         "$dotnet" restore OpenAstroAra.sln --ignore-failed-sources -m:1
+         dotnet_args=(--no-restore)
+     else
+         dotnet_args=()
+     fi
+     "$dotnet" test OpenAstroAra.Test/OpenAstroAra.Test.csproj "${dotnet_args[@]}" --filter \
         'FullyQualifiedName~SystemctlGuiderProcessSupervisorTest|FullyQualifiedName~GuiderActivePollTest|FullyQualifiedName~PHD2Guider' -m:1
      "$dotnet" publish OpenAstroAra.Server/OpenAstroAra.Server.csproj -c Release -r linux-arm64 \
-        --self-contained true -p:PublishAot=false -o "$run/server" -m:1)
+        --self-contained true -p:PublishAot=false -o "$run/server" -m:1 "${dotnet_args[@]}")
     (cd "$client"
-     "$flutter" pub get
+     if (( offline )); then "$flutter" pub get --offline; else "$flutter" pub get; fi
      "$flutter" analyze
      "$flutter" test
      "$flutter" build linux --release)
@@ -282,7 +325,7 @@ HELP
     if [[ -f $run/astap.tar ]]; then "${scp_base[@]}" "$run/astap.tar" "$target:$remote_dir/astap.tar"; fi
     run_remote() {
         printf '%s\n' "${OPENASTRO_PASSWORD:-}" | "${ssh_base[@]}" "$target" \
-            "$(quote_command bash "$remote_dir/update-observatory.sh" --remote "$1" "$remote_dir" "$jobs")"
+        "$(quote_command bash "$remote_dir/update-observatory.sh" --remote "$1" "$remote_dir" "$jobs" "$offline")"
     }
     run_remote build
     [[ $mode != build ]] || { log "Build complete: $run and $target:$remote_dir"; return 0; }

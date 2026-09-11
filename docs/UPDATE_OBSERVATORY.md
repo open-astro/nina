@@ -1,6 +1,6 @@
 # Rebuild and update the observatory
 
-Run `scripts/update-observatory.sh` on the Linux computer displaying ARA. It builds/tests the local Flutter client and publishes the self-contained ARM64 server locally, then builds AlpacaBridge and OpenAstro Guider natively on the SBC. No .NET runtime is required on the SBC. Default SSH destination: `astro@172.24.1.1`.
+Run `scripts/update-observatory.sh` on the Linux computer displaying ARA. It builds/tests the local Linux Flutter client and publishes the self-contained ARM64 server locally, then builds AlpacaBridge and OpenAstro Guider natively on the SBC. No .NET runtime is required on the SBC. Default SSH destination: `astro@172.24.1.1`.
 
 This updates an **existing** installation. It recognizes both manual `/opt/openastroara/server` and packaged `/opt/openastroara` server layouts. Existing service users, local systemd configuration, profile databases, captures, and solver catalog are preserved. Server binaries are deployed directly; this does not change the installed ARA Debian package version. A later APT upgrade can replace them.
 
@@ -23,7 +23,27 @@ unset OPENASTRO_PASSWORD
 
 Password is never stored in source or passed in command arguments. SSH key plus passwordless sudo also works without the variable. Host keys use `accept-new`: new hosts are enrolled; changed keys fail. Existing local SSH configuration still applies.
 
-The SBC must have internet access, ARM64 Debian with package build dependencies available (Trixie for libgpiod 2), sudo permission, and enough disk/memory for three source trees, packages, and backups. Default compilation parallelism is 2; change with `--jobs`. Dependency installation can update build/runtime libraries even under `--build-only`; no application deployment or intentional service stop occurs in that mode.
+Online mode needs SBC internet access, ARM64 Debian with package build dependencies available (Trixie for libgpiod 2), sudo permission, and enough disk/memory for three source trees, packages, and backups. Default compilation parallelism is 2; change with `--jobs`. Dependency installation can update build/runtime libraries even under `--build-only`; no application deployment or intentional service stop occurs in that mode.
+
+### SBC Wi-Fi has no upstream internet
+
+The default run downloads Git sources on the client and APT packages on the SBC. It fails when the SBC hotspot has no upstream route. Use offline mode after staging all three repositories and build caches on the client, and installing the SBC build dependencies once while online:
+
+```bash
+bash scripts/update-observatory.sh --offline --source-root /home/sam/openastro --plan
+bash scripts/update-observatory.sh --offline --source-root /home/sam/openastro --build-only
+bash scripts/update-observatory.sh --offline --source-root /home/sam/openastro
+```
+
+To stage the draft fixes before merge, use their local worktrees:
+
+```bash
+bash scripts/update-observatory.sh --offline --source-root /home/sam/openastro \
+  --ara-url /home/sam/openastro/ara-planning-fixes --ara-ref fix/planning-interaction \
+  --guider-url /home/sam/openastro/ara-guider-recovery --guider-ref fix/guider-service-recovery
+```
+
+`--offline` uses local Git checkouts, `flutter pub get --offline`, cached .NET packages, and installed SBC libraries. It makes no Git, APT, NuGet, or pub downloads. Missing cache or dependency causes a clear build failure. `--plan` always needs no network. `--source-root` expects `openastro-ara`, `AlpacaBridge`, and `openastro-guider` below that directory; a local path passed with `--ara-url`, `--bridge-url`, or `--guider-url` overrides that checkout. For a fresh SBC, use a second network interface, USB tether, or pre-stage Debian packages and SDK caches first.
 
 Do not run install during an observing session. The script stops ARA, guider, and bridge; starting the guider can reconnect equipment. It does not slew or request exposures itself. It does not claim an atomic transaction across hosts or packages.
 
