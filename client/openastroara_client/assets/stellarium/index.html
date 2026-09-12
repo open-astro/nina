@@ -1413,11 +1413,10 @@ StelWebEngine({
     core.comets.addDataSource({ url: base + 'CometEls.txt', key: 'mpc_comets' });
     core.satellites.addDataSource({ url: base + 'tle_satellite.jsonl.gz', key: 'jsonl/sat' });
     // DSS2 colour survey (real photographic sky imagery, shown as you zoom into a
-    // target). This is an online HiPS stream from CDS/STScI — tiles load on demand
-    // and are cached; off-net it simply stays blank and the vector sky is used.
-    // Toggle with the "DSS" layer button; defaults off so off-net users incur no
-    // failed requests until they ask for it.
-    core.dss.addDataSource({ url: 'https://alasky.u-strasbg.fr/DSS/DSSColor' });
+    // target). The loopback server proxies and caches these HiPS tiles under
+    // /dss/, so tiles downloaded once while online remain usable on the SBC-only
+    // hotspot. A cache miss off-net simply leaves the vector sky visible.
+    core.dss.addDataSource({ url: './dss/' });
     s.setFont('regular', './static/fonts/Roboto-Regular.ttf', 1.38);
     s.setFont('bold', './static/fonts/Roboto-Bold.ttf', 1.38);
 

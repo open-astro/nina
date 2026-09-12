@@ -130,10 +130,15 @@ flutter build linux --release   # ships from build/linux/x64/release/bundle/
   Log into an X11 session if XWayland is unavailable.
 - After launching, open the Planning tab and check the planetarium actually draws
   stars/atmosphere — a blank/black sky means a WebGL2 gap in your WebKitGTK build.
-- **Framing photographs:** DSS2 target imagery comes from the online HiPS URL
-  `https://alasky.u-strasbg.fr/DSS/DSSColor`. The frame outline, coordinates, and
-  vector objects work offline; photographic tiles need internet or a separately
-  staged local survey cache.
+- **Framing photographs:** DSS2 target imagery is fetched through the local
+  Stellarium server and cached under the platform application-support directory
+  (`stellarium-dss2`; on Linux, usually
+  `~/.local/share/org.openastro.openastroara/stellarium-dss2`). Open Planning,
+  select a target, and zoom while online; those requested HiPS tiles then remain
+  available when the computer joins the SBC-only hotspot. The frame outline,
+  coordinates, and vector objects always work offline. A tile never viewed
+  online cannot appear without internet or a separately staged cache. This is a
+  client-only cache; the SBC needs no DSS service or Internet route.
 
 ### macOS
 
