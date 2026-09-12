@@ -262,7 +262,13 @@ HELP
     remote_free_kib=$("${ssh_base[@]}" "$target" "df -Pk /home/$user | awk 'NR==2 {print \$4}'") || \
         fail "cannot inspect SBC free space; check SSH and sudo access"
     [[ $remote_free_kib =~ ^[0-9]+$ ]] || fail "invalid SBC free-space report: $remote_free_kib"
-    (( remote_free_kib >= 4194304 )) || fail "SBC needs at least 4 GiB free on /home; reported ${remote_free_kib} KiB. Remove old update runs or other files, then retry."
+    if (( remote_free_kib < 4194304 )); then
+        local remote_usage
+        remote_usage=$("${ssh_base[@]}" "$target" "du -xhd1 /home/$user /var/cache /var/log 2>/dev/null | sort -h | tail -20" || true)
+        fail "SBC needs at least 4 GiB free on /home; reported ${remote_free_kib} KiB. Largest directories:
+${remote_usage}
+Remove only obsolete data, then retry."
+    fi
     log "SBC free space: ${remote_free_kib} KiB"
     mkdir -p "$workspace"
     run=$(mktemp -d "$workspace/run-XXXXXXXX")
