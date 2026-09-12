@@ -183,7 +183,7 @@ PY
 }
 
 main() {
-    local mode=update host=172.24.1.1 user=astro jobs=2 offline=0 source_root=''
+    local mode=update target_mode=all host=172.24.1.1 user=astro jobs=2 offline=0 source_root=''
     local ara_url=https://github.com/open-astro/openastro-ara.git ara_ref=HEAD
     local bridge_url=https://github.com/open-astro/AlpacaBridge.git bridge_ref=HEAD
     local guider_url=https://github.com/open-astro/openastro-guider.git guider_ref=HEAD
@@ -194,6 +194,12 @@ main() {
         case $1 in
             --plan) mode=plan; shift ;;
             --build-only) mode=build; shift ;;
+            --client-only)
+                [[ $target_mode == all || $target_mode == client ]] || fail 'choose one target: --client-only or --sbc-only'
+                target_mode=client; shift ;;
+            --sbc-only)
+                [[ $target_mode == all || $target_mode == sbc ]] || fail 'choose one target: --client-only or --sbc-only'
+                target_mode=sbc; shift ;;
             --offline) offline=1; shift ;;
             --source-root)
                 (($# >= 2)) || fail 'missing value for --source-root'
@@ -210,8 +216,10 @@ main() {
                 shift 2 ;;
             --help|-h)
                 cat <<'HELP'
-Usage: update-observatory.sh [--plan|--build-only] [options]
+Usage: update-observatory.sh [--plan|--build-only] [--client-only|--sbc-only] [options]
 Default: build/test all components, update SBC, install local Linux client.
+--client-only                 build/test/install local Linux Flutter client only
+--sbc-only                    build/push/install ARM64 SBC services only
 Run only when equipment is idle; service restarts interrupt imaging/guiding.
 --host HOST --user USER       defaults: 172.24.1.1 / astro
 --jobs N                      default: 2 (SBC memory budget)
@@ -237,28 +245,37 @@ HELP
     [[ $jobs =~ ^[1-9][0-9]*$ ]] || fail '--jobs must be positive integer'
     [[ $(uname -s) == Linux ]] || fail 'this updater builds the local Linux client'
     [[ $EUID -ne 0 ]] || fail 'do not run with sudo; run as the client user so HOME and Flutter stay correct'
-    log "SBC: $user@$host; native jobs: $jobs"
+    log "Target: $target_mode; SBC: $user@$host; native jobs: $jobs"
     log "ARA: $ara_url $ara_ref; bridge: $bridge_url $bridge_ref; guider: $guider_url $guider_ref"
     log "Client: $install_dir; mode: $mode; offline: $offline; solver/database: ${astap_dir:-preserve existing}"
     [[ $mode != plan ]] || return 0
-    for cmd in git ssh scp tar python3 curl file rsync "$dotnet" "$flutter"; do need "$cmd"; done
+    need git
+    if [[ $target_mode != client ]]; then
+        for cmd in ssh scp tar python3 curl file rsync "$dotnet"; do need "$cmd"; done
+    fi
+    if [[ $target_mode != sbc ]]; then
+        for cmd in tar python3 "$flutter"; do need "$cmd"; done
+    fi
     if [[ -z ${OPENASTRO_PASSWORD:-} && -t 0 ]]; then
-        read -rsp 'SBC SSH/sudo password (blank when SSH key + passwordless sudo): ' OPENASTRO_PASSWORD
-        printf '\n'
-        export OPENASTRO_PASSWORD
+        if [[ $target_mode != client ]]; then
+            read -rsp 'SBC SSH/sudo password (blank when SSH key + passwordless sudo): ' OPENASTRO_PASSWORD
+            printf '\n'
+            export OPENASTRO_PASSWORD
+        fi
     fi
     local -a ssh_base=(ssh -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o StrictHostKeyChecking=accept-new)
     local -a scp_base=(scp -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
-    if [[ -n ${OPENASTRO_PASSWORD:-} ]]; then
+    if [[ $target_mode != client && -n ${OPENASTRO_PASSWORD:-} ]]; then
         need sshpass
         export SSHPASS=$OPENASTRO_PASSWORD
         ssh_base=(sshpass -e "${ssh_base[@]}")
         scp_base=(sshpass -e "${scp_base[@]}")
-    else
+    elif [[ $target_mode != client ]]; then
         ssh_base+=(-o BatchMode=yes)
         scp_base+=(-o BatchMode=yes)
     fi
-    local target="$user@$host" run remote_dir remote_free_kib
+    local target="$user@$host" run='' remote_dir remote_free_kib
+    if [[ $target_mode != client ]]; then
     remote_free_kib=$("${ssh_base[@]}" "$target" "df -Pk /home/$user | awk 'NR==2 {print \$4}'") || \
         fail "cannot inspect SBC free space; check SSH and sudo access"
     [[ $remote_free_kib =~ ^[0-9]+$ ]] || fail "invalid SBC free-space report: $remote_free_kib"
@@ -270,11 +287,14 @@ ${remote_usage}
 Remove only obsolete data, then retry."
     fi
     log "SBC free space: ${remote_free_kib} KiB"
+    fi
     mkdir -p "$workspace"
     run=$(mktemp -d "$workspace/run-XXXXXXXX")
-    remote_dir="/home/$user/.cache/openastro-update/${run##*/}"
     log "Build log/artifacts: $run"
-    "${ssh_base[@]}" "$target" "$(quote_command mkdir -p "$remote_dir")"
+    if [[ $target_mode != client ]]; then
+        remote_dir="/home/$user/.cache/openastro-update/${run##*/}"
+        "${ssh_base[@]}" "$target" "$(quote_command mkdir -p "$remote_dir")"
+    fi
     snapshot() {
         local name=$1 url=$2 ref=$3
         local source=$url
@@ -304,12 +324,17 @@ Remove only obsolete data, then retry."
         printf '%s %s\n' "$name" "$(git -C "$run/$name" rev-parse HEAD)" >> "$run/revisions.txt"
     }
     snapshot ara "$ara_url" "$ara_ref"
-    snapshot bridge "$bridge_url" "$bridge_ref"
-    snapshot guider "$guider_url" "$guider_ref"
+    if [[ $target_mode != client ]]; then
+        snapshot bridge "$bridge_url" "$bridge_ref"
+        snapshot guider "$guider_url" "$guider_ref"
+    fi
     local client="$run/ara/client/openastroara_client" pinned actual
-    pinned=$(tr -d '[:space:]' < "$client/.flutter-version")
-    actual=$("$flutter" --version --machine | python3 -c 'import json,sys; print(json.load(sys.stdin)["frameworkVersion"])')
-    [[ $actual == "$pinned" ]] || fail "Flutter $pinned required; found $actual. Set FLUTTER to pinned SDK."
+    if [[ $target_mode != sbc ]]; then
+        pinned=$(tr -d '[:space:]' < "$client/.flutter-version")
+        actual=$("$flutter" --version --machine | python3 -c 'import json,sys; print(json.load(sys.stdin)["frameworkVersion"])')
+        [[ $actual == "$pinned" ]] || fail "Flutter $pinned required; found $actual. Set FLUTTER to pinned SDK."
+    fi
+    if [[ $target_mode != client ]]; then
     (cd "$run/ara"
      if (( offline )); then
          "$dotnet" restore OpenAstroAra.sln --ignore-failed-sources -m:1
@@ -321,23 +346,32 @@ Remove only obsolete data, then retry."
         'FullyQualifiedName~SystemctlGuiderProcessSupervisorTest|FullyQualifiedName~GuiderActivePollTest|FullyQualifiedName~PHD2Guider' -m:1
      "$dotnet" publish OpenAstroAra.Server/OpenAstroAra.Server.csproj -c Release -r linux-arm64 \
         --self-contained true -p:PublishAot=false -o "$run/server" -m:1 "${dotnet_args[@]}")
+    fi
+    if [[ $target_mode != sbc ]]; then
     (cd "$client"
      if (( offline )); then "$flutter" pub get --offline; else "$flutter" pub get; fi
      "$flutter" analyze
      "$flutter" test
      "$flutter" build linux --release)
+    fi
     local arch
-    case $(uname -m) in x86_64) arch=x64;; aarch64) arch=arm64;; *) fail 'unsupported local CPU';; esac
-    local bundle="$client/build/linux/$arch/release/bundle"
-    [[ -x $bundle/openastroara ]] || fail 'client bundle missing'
-    if [[ -n $astap_dir ]]; then
+    if [[ $target_mode != sbc ]]; then
+        case $(uname -m) in x86_64) arch=x64;; aarch64) arch=arm64;; *) fail 'unsupported local CPU';; esac
+        local bundle="$client/build/linux/$arch/release/bundle"
+        [[ -x $bundle/openastroara ]] || fail 'client bundle missing'
+    fi
+    if [[ $target_mode != client && -n $astap_dir ]]; then
         [[ -x $astap_dir/astap_cli ]] || fail 'ASTAP executable missing'
         file "$astap_dir/astap_cli" | grep -q 'ARM aarch64' || fail 'ASTAP must be ARM64'
         tar -cf "$run/astap.tar" -C "$astap_dir" .
     fi
+    if [[ $target_mode != client ]]; then
     cp "${BASH_SOURCE[0]}" "$run/update-observatory.sh"
     tar --exclude=.git --exclude="ara/*/bin" --exclude="ara/*/obj" --exclude="ara/client/openastroara_client/build" --exclude=.dart_tool -czf "$run/payload.tar.gz" -C "$run" ara bridge guider server revisions.txt update-observatory.sh
+    (cd "$run" && sha256sum payload.tar.gz > payload.tar.gz.sha256)
     "${scp_base[@]}" "$run/payload.tar.gz" "$target:$remote_dir/payload.tar.gz"
+    "${scp_base[@]}" "$run/payload.tar.gz.sha256" "$target:$remote_dir/payload.tar.gz.sha256"
+    "${ssh_base[@]}" "$target" "cd $(printf '%q' "$remote_dir") && sha256sum -c payload.tar.gz.sha256"
     "${ssh_base[@]}" "$target" "$(quote_command tar -xzf "$remote_dir/payload.tar.gz" -C "$remote_dir")"
     if [[ -f $run/astap.tar ]]; then "${scp_base[@]}" "$run/astap.tar" "$target:$remote_dir/astap.tar"; fi
     run_remote() {
@@ -347,16 +381,29 @@ Remove only obsolete data, then retry."
     run_remote build
     [[ $mode != build ]] || { log "Build complete: $run and $target:$remote_dir"; return 0; }
     run_remote install
+    fi
     # Retain previous bundle; install only after remote health checks succeed.
-    mkdir -p "$(dirname "$install_dir")"
-    local next="$install_dir.next-${run##*/}"
-    mkdir "$next"
-    cp -a "$bundle/." "$next/"
-    if [[ -e $install_dir ]]; then mv "$install_dir" "$install_dir.previous-${run##*/}"; fi
-    mv "$next" "$install_dir"
-    mkdir -p "$HOME/.local/bin"
-    ln -sfn "$install_dir/openastroara" "$HOME/.local/bin/openastroara"
-    log "Updated. Relaunch $HOME/.local/bin/openastroara; connect to $host:5555."
+    if [[ $target_mode != sbc && $mode != build ]]; then
+        mkdir -p "$(dirname "$install_dir")"
+        local next="$install_dir.next-${run##*/}"
+        mkdir "$next"
+        cp -a "$bundle/." "$next/"
+        if [[ -e $install_dir ]]; then mv "$install_dir" "$install_dir.previous-${run##*/}"; fi
+        mv "$next" "$install_dir"
+        mkdir -p "$HOME/.local/bin"
+        ln -sfn "$install_dir/openastroara" "$HOME/.local/bin/openastroara"
+        if [[ $target_mode == all ]]; then
+            log "Updated. Relaunch $HOME/.local/bin/openastroara; connect to $host:5555."
+        else
+            log "Local ARA client updated. Relaunch $HOME/.local/bin/openastroara."
+        fi
+    elif [[ $target_mode == client ]]; then
+        log "Client build complete: $run"
+    elif [[ $target_mode == sbc ]]; then
+        log "SBC ARA services updated over SSH/Wi-Fi. Recovery backup is on the SBC."
+    else
+        log "Updated. Relaunch $HOME/.local/bin/openastroara; connect to $host:5555."
+    fi
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then

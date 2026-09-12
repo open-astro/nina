@@ -6,6 +6,8 @@ import tempfile
 import unittest
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'update-observatory.sh'
+CLIENT_SCRIPT = SCRIPT.with_name('update-ara-client.sh')
+SBC_SCRIPT = SCRIPT.with_name('update-ara-sbc.sh')
 
 class UpdaterTests(unittest.TestCase):
     def run_script(self, *args, **kwargs):
@@ -26,6 +28,13 @@ class UpdaterTests(unittest.TestCase):
             result = self.run_script('--offline', '--plan', '--source-root', d, env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('offline: 1', result.stdout)
+
+    def test_split_wrappers_select_one_target_without_tools(self):
+        for script, target in ((CLIENT_SCRIPT, 'client'), (SBC_SCRIPT, 'sbc')):
+            with self.subTest(script=script.name):
+                result = subprocess.run(['bash', str(script), '--plan'], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f'Target: {target}', result.stdout)
 
     def test_rejects_bad_inputs_before_network(self):
         for args in [('--jobs', '0'), ('--host', 'host;touch /tmp/bad'),

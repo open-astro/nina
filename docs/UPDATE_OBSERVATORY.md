@@ -1,5 +1,7 @@
 # Rebuild and update the observatory
 
+Split commands are now available: [`update-ara-client.sh`](../scripts/update-ara-client.sh) updates only the local Linux client; [`update-ara-sbc.sh`](../scripts/update-ara-sbc.sh) updates only the ARM64 SBC over SSH/Wi-Fi. Use [`UPDATE_ARA_SPLIT.md`](UPDATE_ARA_SPLIT.md) for the normal workflow. The combined command below remains for compatibility.
+
 Run `scripts/update-observatory.sh` on the Linux computer displaying ARA. It builds/tests the local Linux Flutter client and publishes the self-contained ARM64 server locally, then builds AlpacaBridge and OpenAstro Guider natively on the SBC. No .NET runtime is required on the SBC. Default SSH destination: `astro@172.24.1.1`.
 
 This updates an **existing** installation. It recognizes both manual `/opt/openastroara/server` and packaged `/opt/openastroara` server layouts. Existing service users, local systemd configuration, profile databases, captures, and solver catalog are preserved. Server binaries are deployed directly; this does not change the installed ARA Debian package version. A later APT upgrade can replace them.
