@@ -123,11 +123,17 @@ flutter build linux --release   # ships from build/linux/x64/release/bundle/
 - `libsecret-1-dev` + `libjsoncpp-dev` are required by the `flutter_secure_storage_linux`
   plugin — without them the build fails at CMake configure.
 - **Wayland sessions:** Flutter's Linux GL path wants X11. If you hit
-  `Failed to create platform view rendering surface` (or a blank window), you're on a
-  Wayland session — log into an X11 session or prefix runs with
-  `GDK_BACKEND=x11 flutter run -d linux`.
+  `Failed to create platform view rendering surface`, a blank window, or an
+  `OpenGL frame ... have ...` size timeout, launch the release bundle with
+  `GDK_BACKEND=x11 path/to/openastroara`. Keep `GDK_SCALE=1` only when the
+  display still reports a framebuffer mismatch; it makes Flutter chrome smaller.
+  Log into an X11 session if XWayland is unavailable.
 - After launching, open the Planning tab and check the planetarium actually draws
   stars/atmosphere — a blank/black sky means a WebGL2 gap in your WebKitGTK build.
+- **Framing photographs:** DSS2 target imagery comes from the online HiPS URL
+  `https://alasky.u-strasbg.fr/DSS/DSSColor`. The frame outline, coordinates, and
+  vector objects work offline; photographic tiles need internet or a separately
+  staged local survey cache.
 
 ### macOS
 
@@ -229,8 +235,10 @@ simulators — the same devices the integration tests use
 - **A run dies on a missing `lib*.so`** →
   `sudo apt install apt-file && sudo apt-file update && apt-file search libNAME.so`
   tells you which package provides it.
-- **GL context / "Failed to create platform view rendering surface" (Linux)** →
-  Wayland session; use X11 or `GDK_BACKEND=x11` (see the Linux section above).
+- **GL context / "Failed to create platform view rendering surface" or an OpenGL
+  frame-size timeout (Linux)** → Wayland/HiDPI resize path; use
+  `GDK_BACKEND=x11` (see the Linux section above), then remove forced scale
+  variables so the UI keeps normal size.
 - **Planetarium shows a blank/black sky** → the platform webview lacks WebGL2
   (old WebKitGTK, or missing WebView2 runtime on Windows). Stars + atmosphere
   drawing = the webview path is healthy.
