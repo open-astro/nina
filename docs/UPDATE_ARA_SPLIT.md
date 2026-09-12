@@ -19,6 +19,17 @@ bash scripts/update-ara-client.sh --offline --source-root /home/sam/openastro
 
 The command snapshots ARA, runs Flutter analyze/tests, builds the Linux release bundle, then atomically installs it at `~/.local/opt/openastroara` and links `~/.local/bin/openastroara`. It does not contact the SBC.
 
+To build the current local ARA worktree, including uncommitted files and local
+commits not pushed upstream, add `--local`:
+
+```bash
+bash scripts/update-ara-client.sh --local --offline \
+  --source-root /home/sam/openastro
+```
+
+`--local` snapshots only the ARA worktree. Generated Flutter/.NET output is
+excluded. Other repositories keep their normal source selection.
+
 To test the planning fix worktree:
 
 ```bash
@@ -26,7 +37,7 @@ bash scripts/update-ara-client.sh --offline --ara-url /home/sam/openastro/ara-pl
   --ara-ref fix/planning-interaction
 ```
 
-Offline client builds require the pinned Flutter SDK and all Dart packages in the local pub cache. Set `OPENASTRO_UPDATE_DIR=/tmp/openastro-update` if the normal cache filesystem is not writable.
+Offline client builds require the pinned Flutter SDK and all Dart packages in the local pub cache. The updater resolves packages once with `flutter pub get --offline`, then passes `--no-pub` to analyze, test, and build so Flutter does not contact pub.dev for advisories. Set `OPENASTRO_UPDATE_DIR=/tmp/openastro-update` if the normal cache filesystem is not writable.
 
 ## SBC services over the OpenAstro hotspot
 

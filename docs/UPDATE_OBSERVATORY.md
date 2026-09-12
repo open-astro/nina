@@ -47,7 +47,12 @@ bash scripts/update-observatory.sh --offline --source-root /home/sam/openastro \
   --guider-url /home/sam/openastro/ara-guider-recovery --guider-ref fix/guider-service-recovery
 ```
 
-`--offline` uses local Git checkouts, `flutter pub get --offline`, cached .NET packages, and installed SBC libraries. It makes no Git, APT, NuGet, or pub downloads. Missing cache or dependency causes a clear build failure. `--plan` always needs no network. `--source-root` expects `openastro-ara`, `AlpacaBridge`, and `openastro-guider` below that directory; a local path passed with `--ara-url`, `--bridge-url`, or `--guider-url` overrides that checkout. For a fresh SBC, use a second network interface, USB tether, or pre-stage Debian packages and SDK caches first.
+`--offline` uses local Git checkouts, `flutter pub get --offline`, cached .NET packages, and installed SBC libraries. The client build then passes `--no-pub` to Flutter analyze/test/build, preventing pub.dev advisory lookups. It makes no Git, APT, NuGet, or pub downloads. Missing cache or dependency causes a clear build failure. `--plan` always needs no network. `--source-root` expects `openastro-ara`, `AlpacaBridge`, and `openastro-guider` below that directory; a local path passed with `--ara-url`, `--bridge-url`, or `--guider-url` overrides that checkout. For a fresh SBC, use a second network interface, USB tether, or pre-stage Debian packages and SDK caches first.
+
+Use `--local` to snapshot the current ARA worktree instead of cloning its
+committed Git state. This includes uncommitted files and local commits not yet
+pushed. It is intended for local client testing; generated build/cache output
+is excluded. Other repositories keep their normal source selection.
 
 Do not run install during an observing session. The script stops ARA, guider, and bridge; starting the guider can reconnect equipment. It does not slew or request exposures itself. It does not claim an atomic transaction across hosts or packages.
 

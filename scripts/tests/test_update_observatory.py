@@ -29,6 +29,18 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('offline: 1', result.stdout)
 
+    def test_local_plan_is_successful_without_tools_or_network(self):
+        result = self.run_script('--local', '--plan', env=dict(
+            os.environ, DOTNET='/missing/dotnet', FLUTTER='/missing/flutter'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('local: 1', result.stdout)
+
+    def test_offline_client_commands_do_not_recheck_pub_dev(self):
+        source = SCRIPT.read_text()
+        self.assertIn('"$flutter" analyze --no-pub', source)
+        self.assertIn('"$flutter" test --no-pub', source)
+        self.assertIn('"$flutter" build linux --release --no-pub', source)
+
     def test_split_wrappers_select_one_target_without_tools(self):
         for script, target in ((CLIENT_SCRIPT, 'client'), (SBC_SCRIPT, 'sbc')):
             with self.subTest(script=script.name):

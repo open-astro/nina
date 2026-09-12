@@ -3,6 +3,7 @@
 set +x
 set -Eeuo pipefail
 umask 077
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null || fail "missing command: $1"; }
@@ -183,7 +184,7 @@ PY
 }
 
 main() {
-    local mode=update target_mode=all host=172.24.1.1 user=astro jobs=2 offline=0 source_root=''
+    local mode=update target_mode=all host=172.24.1.1 user=astro jobs=2 offline=0 local_mode=0 source_root=''
     local ara_url=https://github.com/open-astro/openastro-ara.git ara_ref=HEAD
     local bridge_url=https://github.com/open-astro/AlpacaBridge.git bridge_ref=HEAD
     local guider_url=https://github.com/open-astro/openastro-guider.git guider_ref=HEAD
@@ -201,6 +202,7 @@ main() {
                 [[ $target_mode == all || $target_mode == sbc ]] || fail 'choose one target: --client-only or --sbc-only'
                 target_mode=sbc; shift ;;
             --offline) offline=1; shift ;;
+            --local) local_mode=1; shift ;;
             --source-root)
                 (($# >= 2)) || fail 'missing value for --source-root'
                 source_root=$2; shift 2 ;;
@@ -224,6 +226,7 @@ Run only when equipment is idle; service restarts interrupt imaging/guiding.
 --host HOST --user USER       defaults: 172.24.1.1 / astro
 --jobs N                      default: 2 (SBC memory budget)
 --offline                     use local source/dependency caches; no downloads
+--local                       build current local ARA worktree, including dirty files
 --source-root DIR             local sibling checkouts for --offline
 --ara-url URL --ara-ref REF    default: upstream HEAD; accepts PR refs/commit IDs
 --bridge-url URL --bridge-ref REF
@@ -247,7 +250,7 @@ HELP
     [[ $EUID -ne 0 ]] || fail 'do not run with sudo; run as the client user so HOME and Flutter stay correct'
     log "Target: $target_mode; SBC: $user@$host; native jobs: $jobs"
     log "ARA: $ara_url $ara_ref; bridge: $bridge_url $bridge_ref; guider: $guider_url $guider_ref"
-    log "Client: $install_dir; mode: $mode; offline: $offline; solver/database: ${astap_dir:-preserve existing}"
+    log "Client: $install_dir; mode: $mode; offline: $offline; local: $local_mode; solver/database: ${astap_dir:-preserve existing}"
     [[ $mode != plan ]] || return 0
     need git
     if [[ $target_mode != client ]]; then
@@ -298,6 +301,41 @@ Remove only obsolete data, then retry."
     snapshot() {
         local name=$1 url=$2 ref=$3
         local source=$url
+        if (( local_mode )) && [[ $name == ara ]]; then
+            if [[ -z $source_root ]]; then
+                source_root=${OPENASTRO_SOURCE_ROOT:-}
+                if [[ -z $source_root || ! -e $source_root/openastro-ara/.git ]]; then
+                    for candidate in "$(pwd)" "$(cd -- "$script_dir/../.." && pwd)"; do
+                        if [[ -e $candidate/openastro-ara/.git ]]; then
+                            source_root=$candidate
+                            break
+                        fi
+                    done
+                fi
+            fi
+            if [[ -e $url/.git ]]; then
+                source=$url
+            else
+                source="$source_root/openastro-ara"
+            fi
+            [[ -e $source/.git ]] || fail "local ARA source missing: $source"
+            [[ ! -f $source/.gitmodules ]] || fail 'submodule repository requires explicit snapshot support'
+            local revision
+            revision=$(git -C "$source" rev-parse HEAD)
+            mkdir -p "$run/$name"
+            # Copy the worktree, not Git's index: this preserves uncommitted,
+            # untracked, and local-only commits for a test build. Generated
+            # Flutter/.NET output stays out of the immutable updater snapshot.
+            tar -C "$source" \
+                --exclude='.git' \
+                --exclude='client/openastroara_client/build' \
+                --exclude='client/openastroara_client/.dart_tool' \
+                --exclude='**/bin' \
+                --exclude='**/obj' \
+                -cf - . | tar -C "$run/$name" -xf -
+            printf '%s %s-local-worktree\n' "$name" "$revision" >> "$run/revisions.txt"
+            return
+        fi
         if (( offline )); then
             if [[ -z $source_root ]]; then
                 source_root=${OPENASTRO_SOURCE_ROOT:-$(pwd)}
@@ -349,10 +387,20 @@ Remove only obsolete data, then retry."
     fi
     if [[ $target_mode != sbc ]]; then
     (cd "$client"
-     if (( offline )); then "$flutter" pub get --offline; else "$flutter" pub get; fi
-     "$flutter" analyze
-     "$flutter" test
-     "$flutter" build linux --release)
+     if (( offline )); then
+         # Resolve once from the local cache. Every later Flutter command must
+         # use --no-pub: Flutter otherwise performs a pub.dev advisory lookup,
+         # which breaks the promise that --offline makes no network requests.
+         "$flutter" pub get --offline
+         "$flutter" analyze --no-pub
+         "$flutter" test --no-pub
+         "$flutter" build linux --release --no-pub
+     else
+         "$flutter" pub get
+         "$flutter" analyze
+         "$flutter" test
+         "$flutter" build linux --release
+     fi)
     fi
     local arch
     if [[ $target_mode != sbc ]]; then
