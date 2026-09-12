@@ -39,6 +39,14 @@ bash scripts/update-ara-client.sh --offline --ara-url /home/sam/openastro/ara-pl
 
 Offline client builds require the pinned Flutter SDK and all Dart packages in the local pub cache. The updater resolves packages once with `flutter pub get --offline`, then passes `--no-pub` to analyze, test, and build so Flutter does not contact pub.dev for advisories. Set `OPENASTRO_UPDATE_DIR=/tmp/openastro-update` if the normal cache filesystem is not writable.
 
+After installing the planning branch, seed DSS2 photographs before going to the
+SBC hotspot. With normal Internet access, launch the client, open Planning,
+enable DSS2, select each target, and zoom until its photograph appears. The
+client stores requested tiles in the local application-support
+`stellarium-dss2` cache. Close and relaunch after joining the SBC hotspot; the
+cached tiles and framing overlays work without Internet. Never-viewed tiles
+still need an online seed.
+
 ## SBC services over the OpenAstro hotspot
 
 Connect the PC to the SBC Wi-Fi, then run as the normal desktop user:
